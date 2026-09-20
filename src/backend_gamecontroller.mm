@@ -51,7 +51,20 @@ struct Entry {
   bool rumble_timed = false;
 };
 
-void stop_motor(Motor &m) {
+/// Stops one motor. With `pending`, the engine's stop is tracked by that
+/// group so the caller can wait for the haptic service to acknowledge it.
+void stop_motor(Motor &m, dispatch_group_t pending = nil) {
+  if (m.engine != nil) {
+    // Detach the handlers before anything else. They capture a pointer to
+    // this Motor, and releasing or stopping the engine below makes the
+    // system call them -- on some other queue, later, by which time the
+    // Entry that owns the Motor may have been freed. Empty blocks rather
+    // than nil, because the properties are declared non-null.
+    m.engine.stoppedHandler = ^(CHHapticEngineStoppedReason) {
+    };
+    m.engine.resetHandler = ^{
+    };
+  }
   if (m.player != nil) {
     // Zero the intensity before stopping rather than only stopping.
     // Stopping is asynchronous and the process may be gone before it
@@ -65,7 +78,14 @@ void stop_motor(Motor &m) {
     [m.player stopAtTime:0 error:nil];
   }
   if (m.engine != nil) {
-    [m.engine stopWithCompletionHandler:nil];
+    if (pending != nil) {
+      dispatch_group_enter(pending);
+      [m.engine stopWithCompletionHandler:^(NSError *) {
+        dispatch_group_leave(pending);
+      }];
+    } else {
+      [m.engine stopWithCompletionHandler:nil];
+    }
   }
   m.player = nil;
   m.engine = nil;
@@ -219,9 +239,18 @@ public:
   }
 
   void shutdown() override {
+    // Every motor's stop is issued first and waited for once, because
+    // stopping is asynchronous and a process that exits straight after
+    // asking can be gone before the haptic service has acted -- which is
+    // the pad that keeps buzzing after the game has quit. Bounded, so a
+    // service that never answers costs a quarter of a second, not a hang.
+    // Only here: a disconnect mid-game must not stall a frame.
+    dispatch_group_t pending = dispatch_group_create();
     for (auto &e : entries_) {
-      stop_all(*e);
+      stop_all(*e, pending);
     }
+    dispatch_group_wait(pending,
+                        dispatch_time(DISPATCH_TIME_NOW, 250 * NSEC_PER_MSEC));
     entries_.clear();
     host_ = nullptr;
   }
@@ -326,11 +355,11 @@ private:
     return nullptr;
   }
 
-  static void stop_all(Entry &e) {
-    stop_motor(e.low);
-    stop_motor(e.high);
-    stop_motor(e.trigger_left);
-    stop_motor(e.trigger_right);
+  static void stop_all(Entry &e, dispatch_group_t pending = nil) {
+    stop_motor(e.low, pending);
+    stop_motor(e.high, pending);
+    stop_motor(e.trigger_left, pending);
+    stop_motor(e.trigger_right, pending);
   }
 
   void add(GCController *c) {
