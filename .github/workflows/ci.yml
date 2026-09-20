@@ -1,0 +1,214 @@
+# The three platforms, built for real.
+#
+# This matters more for this project than for most: two of the four
+# backends cannot be compiled on a developer's machine, whichever machine
+# that is. The detection in cmake/GpplusBackends.cmake decides what to
+# build from what it can probe, so a backend that stops compiling does not
+# fail the build -- it quietly disappears from it. The `require` jobs below
+# pass GPPLUS_BACKEND_<NAME>=ON, which turns that silence into an error.
+
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  format:
+    name: clang-format
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: check formatting
+        # Pinned, because clang-format's output changes between releases and
+        # an unpinned check turns "someone upgraded the runner" into a red
+        # build. Bump it together with a reformat, in one commit.
+        run: |
+          pipx install clang-format==16.0.6
+          git ls-files '*.cpp' '*.hpp' '*.mm' \
+            | xargs clang-format --dry-run --Werror
+
+  build:
+    name: ${{ matrix.name }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: linux-evdev
+            os: ubuntu-latest
+            require: -DGPPLUS_BACKEND_EVDEV=ON
+          - name: macos-gamecontroller-iokit
+            os: macos-latest
+            require: -DGPPLUS_BACKEND_GAMECONTROLLER=ON -DGPPLUS_BACKEND_IOKIT=ON
+          - name: windows
+            os: windows-latest
+            require: -DGPPLUS_BACKEND_XINPUT=ON -DGPPLUS_BACKEND_DINPUT=ON
+    steps:
+      - uses: actions/checkout@v4
+      - name: a real gamepad, from the kernel
+        # uinput lets the test ask the kernel for a device that the evdev
+        # backend then finds, opens and reads exactly as it would hardware.
+        # It is the only end-to-end coverage any backend gets, so the
+        # module is loaded deliberately rather than hoped for.
+        if: runner.os == 'Linux'
+        run: sudo modprobe uinput
+      - name: configure
+        run: >
+          cmake -S . -B build -DCMAKE_BUILD_TYPE=RelWithDebInfo
+          -DGPPLUS_WERROR=ON -DGPPLUS_BUILD_TESTS=ON ${{ matrix.require }}
+      - name: what the probes said
+        # A backend whose probe fails is reported as "its probe did not
+        # build", which is true and no help. This is the compiler's side of
+        # it, printed only when the configure did not survive.
+        if: failure() && runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          foreach ($f in 'build/CMakeFiles/CMakeConfigureLog.yaml', 'build/CMakeFiles/CMakeError.log') {
+            if (Test-Path $f) { Write-Host "=== $f"; Get-Content $f -Tail 150 }
+          }
+      - name: build
+        run: cmake --build build --config RelWithDebInfo -j 4
+      - name: test
+        # The uinput test is run separately and as root: it writes to
+        # /dev/uinput, and the node udev then creates for the virtual pad
+        # is root:input 0600, so the process that reads it back has to be
+        # root too. Everything else runs as the ordinary user.
+        shell: bash
+        run: |
+          if [ "${{ runner.os }}" = "Linux" ]; then
+            ctest --test-dir build -C RelWithDebInfo -E uinput --output-on-failure
+            sudo ctest --test-dir build -C RelWithDebInfo -R uinput \
+              --output-on-failure | tee uinput.log
+            # A skip would mean the one end-to-end test quietly stopped
+            # running, which is the failure this job exists to prevent.
+            grep -qE 'uinput \.+ +Passed' uinput.log
+          else
+            ctest --test-dir build -C RelWithDebInfo --output-on-failure
+          fi
+      - name: install
+        run: cmake --install build --config RelWithDebInfo --prefix "${{ runner.temp }}/prefix"
+
+  vigem:
+    # The Windows counterpart of the uinput test: a kernel driver that
+    # emulates an Xbox 360 pad and a DualShock 4, so XInput and DirectInput
+    # each read a device they cannot tell from hardware.
+    #
+    # Deliberately not required to pass. Whether a hosted runner permits the
+    # driver install, and whether XInput sees a virtual pad there, are
+    # unknowns that only a run can answer, and a flaky required job is worse
+    # than no job. It still says what happened: the test exits "skipped" when
+    # the driver is absent, and the step below turns a skip into a failure so
+    # that a run which proved nothing is not shown as a pass. Promote it to
+    # required once it has been stable for a while.
+    #
+    # ViGEmBus is retired upstream (no further releases), so this is pinned
+    # to the last one and a future Windows update may break it for reasons
+    # that are not this library's.
+    name: windows-vigem
+    runs-on: windows-latest
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v4
+      - name: install ViGEmBus
+        shell: pwsh
+        run: |
+          choco install vigembus --version 1.22.0 -y --no-progress
+          # 3010 and 1641 both mean "installed, restart pending", which the
+          # package's own installer script accepts as success.
+          if ($LASTEXITCODE -notin 0, 1641, 3010) { exit $LASTEXITCODE }
+          $global:LASTEXITCODE = 0
+      - name: is the driver there
+        # Informational: the test's own connect is the real check. This is
+        # here so a failed install leaves something to read.
+        shell: pwsh
+        continue-on-error: true
+        run: |
+          sc.exe query ViGEmBus
+          Get-ChildItem $env:TEMP -Filter '*MsiInstall.log' |
+            Sort-Object LastWriteTime | Select-Object -Last 1 |
+            ForEach-Object { Get-Content $_.FullName -Tail 40 }
+      - name: configure
+        run: >
+          cmake -S . -B build -DGPPLUS_WERROR=ON -DGPPLUS_BUILD_TESTS=ON
+          -DGPPLUS_BACKEND_XINPUT=ON -DGPPLUS_BACKEND_DINPUT=ON
+          -DGPPLUS_TEST_VIGEM=ON
+      - name: what the probes said
+        # A backend whose probe fails is reported as "its probe did not
+        # build", which is true and no help. This is the compiler's side of
+        # it, printed only when the configure did not survive.
+        if: failure()
+        shell: pwsh
+        run: |
+          foreach ($f in 'build/CMakeFiles/CMakeConfigureLog.yaml', 'build/CMakeFiles/CMakeError.log') {
+            if (Test-Path $f) { Write-Host "=== $f"; Get-Content $f -Tail 150 }
+          }
+      - name: build
+        run: cmake --build build --config RelWithDebInfo -j 4
+      - name: test
+        shell: pwsh
+        run: |
+          # --verbose, because ctest hides a passing test's output and a
+          # skipped phase is only visible in it.
+          $log = ctest --test-dir build -C RelWithDebInfo -R vigem --verbose 2>&1 | Out-String
+          Write-Host $log
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          # The Xbox 360 phase cannot run on a hosted Windows Server image
+          # (no inbox Xbox driver, so the emulated pad never starts). The
+          # test skips it and says so; this makes the gap visible on the run
+          # page instead of only in the log.
+          if ($log -match 'SKIPPED:') {
+            Write-Host '::warning::the Xbox 360 / XInput phase was skipped (no Xbox driver on this runner); XInput is not covered by this run'
+          }
+          # ctest counts a skip as a pass and mentions it in a footnote.
+          # Here that would mean the driver never came up at all, so nothing
+          # was tested and the job should not look green.
+          if ($log -match 'did not run') {
+            Write-Host '::error::the ViGEm test was skipped; the driver is not usable on this runner'
+            exit 1
+          }
+
+  consume:
+    name: consume-via-fetchcontent
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: a project that only knows the FetchContent lines
+        run: |
+          mkdir -p /tmp/consumer
+          cd /tmp/consumer
+          cat > CMakeLists.txt <<'CMAKE'
+          cmake_minimum_required(VERSION 3.16)
+          project(consumer LANGUAGES CXX)
+          include(FetchContent)
+          FetchContent_Declare(gpplus SOURCE_DIR $ENV{GITHUB_WORKSPACE})
+          FetchContent_MakeAvailable(gpplus)
+          add_executable(consumer main.cpp)
+          target_link_libraries(consumer PRIVATE gpplus::gpplus)
+          CMAKE
+          cat > main.cpp <<'CPP'
+          #include <gpplus/gamepad.hpp>
+          int main() {
+            gpp::Context ctx;
+            ctx.update();
+            return ctx.device_count() >= 0 ? 0 : 1;
+          }
+          CPP
+          cmake -S . -B build
+          cmake --build build -j 4
+          ./build/consumer
+
+  offline:
+    name: no-network-build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: configure with the database download disabled
+        # A build behind a proxy, in a hermetic CI, or on a plane has to
+        # work. It loses the database and keeps everything else.
+        run: >
+          cmake -S . -B build -DGPPLUS_DOWNLOAD_CONTROLLER_DB=OFF
+          -DGPPLUS_BUILD_TESTS=ON
+      - run: cmake --build build -j 4
+      - run: ctest --test-dir build --output-on-failure

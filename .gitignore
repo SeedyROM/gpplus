@@ -1,0 +1,44 @@
+# Build trees. Out-of-source is the only supported layout, but the
+# in-source droppings are listed anyway because one `cmake .` by accident
+# is all it takes.
+build/
+build-*/
+cmake-build-*/
+out/
+CMakeCache.txt
+CMakeFiles/
+CMakeUserPresets.json
+cmake_install.cmake
+compile_commands.json
+Testing/
+
+# clangd's index; regenerated on demand.
+.cache/
+
+# The mapping database, when it is vendored here rather than downloaded.
+# It is someone else's data under someone else's copyright; the build
+# fetches it, and data/README.md says how to keep a local copy for an
+# offline build without committing one.
+data/gamecontrollerdb.txt
+
+# Build output that lands outside a build tree.
+*.o
+*.obj
+*.a
+*.lib
+*.so
+*.so.*
+*.dylib
+*.dll
+*.exe
+*.pdb
+*.ilk
+*.dSYM/
+
+# Coverage and sanitizer runs.
+*.gcda
+*.gcno
+*.profraw
+*.profdata
+
+.DS_Store
