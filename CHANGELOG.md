@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.1.1-alpha — 2026-09-21
+
+### Fixed
+
+- Missing shutdown signals for rumbles.
+- Extra messaging being sent to the macOS `gamecontrollerd` daemon.
+- Flaky discovery bursts.
+- Duplicate requests to controller archs.
+
 ## 0.1.0-alpha — 2026-09-19
 
 First release. Gamepad input for C++17 with no platform layer attached: the

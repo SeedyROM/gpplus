@@ -14,7 +14,7 @@
 # one your game already has.
 
 cmake_minimum_required(VERSION 3.16)
-project(gpplus VERSION 0.1.0 LANGUAGES CXX)
+project(gpplus VERSION 0.1.1 LANGUAGES CXX)
 
 if(APPLE)
   # Needed before any Objective-C++ probe runs, and harmless otherwise.
