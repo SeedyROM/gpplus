@@ -274,12 +274,17 @@ public:
     // GCController only publishes controllers once the framework has been
     // told to look, and on macOS that is this call. Without it the first
     // poll finds nothing and the pad appears a second later, which reads
-    // as a flaky pad rather than a missing call.
-    [GCController startWirelessControllerDiscoveryWithCompletionHandler:nil];
+    // as a flaky pad rather than a missing call. begin_discovery() bounds
+    // how long that scan is allowed to run -- see its comment.
+    begin_discovery();
     return true;
   }
 
   void shutdown() override {
+    if (discovery_active_) {
+      [GCController stopWirelessControllerDiscovery];
+      discovery_active_ = false;
+    }
     // Every motor's stop is issued first and waited for once, because
     // stopping is asynchronous and a process that exits straight after
     // asking can be gone before the haptic service has acted -- which is
@@ -297,6 +302,8 @@ public:
   }
 
   void poll(bool rescan) override {
+    update_discovery();
+
     // The controllers array is live, so scanning it *is* the hotplug
     // check; `rescan` only paces the battery query below.
     NSArray<GCController *> *controllers = [GCController controllers];
@@ -391,6 +398,48 @@ public:
   }
 
 private:
+  // How long one discovery burst runs before this stops it itself, rather
+  // than trusting the framework's own undocumented timeout. Long enough to
+  // catch a pad that's paired but was asleep or off when the app launched
+  // -- the observed behaviour this call exists for is a pad appearing "a
+  // second later" -- and short enough that this is not an active Bluetooth
+  // scan for the rest of the session. Apple's own guidance frames
+  // discovery as a user-initiated "pairing mode" (pause gameplay, show a
+  // searching UI, let the player cancel), not something to start
+  // unconditionally at launch and leave running; this bounds it to
+  // approximate that without needing a UI of its own.
+  static constexpr Clock::duration kDiscoveryBurstDuration =
+      std::chrono::seconds(5);
+
+  // How often a burst is retried while no GameController-recognized pad is
+  // connected, so one powered on mid-session is still found without this
+  // having stayed in discovery mode continuously since launch.
+  static constexpr Clock::duration kDiscoveryRetryInterval =
+      std::chrono::seconds(30);
+
+  void begin_discovery() {
+    [GCController startWirelessControllerDiscoveryWithCompletionHandler:nil];
+    discovery_active_ = true;
+    discovery_deadline_ = Clock::now() + kDiscoveryBurstDuration;
+  }
+
+  /// Ends a burst once it has run its course, and starts another if
+  /// nothing is connected and enough time has passed since the last one.
+  void update_discovery() {
+    const auto now = Clock::now();
+    if (discovery_active_) {
+      if (now >= discovery_deadline_) {
+        [GCController stopWirelessControllerDiscovery];
+        discovery_active_ = false;
+        next_discovery_attempt_ = now + kDiscoveryRetryInterval;
+      }
+      return;
+    }
+    if (entries_.empty() && now >= next_discovery_attempt_) {
+      begin_discovery();
+    }
+  }
+
   Entry *find(GCController *c) {
     for (auto &e : entries_) {
       if (e->controller == c) {
@@ -497,6 +546,9 @@ private:
   Host *host_ = nullptr;
   std::vector<std::unique_ptr<Entry>> entries_;
   unsigned next_key_ = 0;
+  bool discovery_active_ = false;
+  Clock::time_point discovery_deadline_{};
+  Clock::time_point next_discovery_attempt_{};
 };
 
 } // namespace
