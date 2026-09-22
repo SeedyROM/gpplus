@@ -38,6 +38,12 @@ struct Motor {
   id<CHHapticPatternPlayer> player = nil;
   float intensity = -1.0f;
   bool failed = false;
+  // Set the moment intensity settles at ~0, cleared the moment it's asked
+  // for a non-zero value again. What lets poll() notice "quiet for a
+  // while" and release the engine instead of leaving it running forever
+  // at zero intensity -- see kMotorIdleTimeout.
+  bool idle = false;
+  Clock::time_point idle_since{};
 };
 
 struct Entry {
@@ -90,6 +96,33 @@ void stop_motor(Motor &m, dispatch_group_t pending = nil) {
   m.player = nil;
   m.engine = nil;
   m.intensity = -1.0f;
+  m.idle = false;
+  m.idle_since = Clock::time_point{};
+}
+
+/**
+ * @brief Releases a motor's engine once it has sat at ~zero intensity for
+ * kMotorIdleTimeout.
+ *
+ * A haptic engine costs real, ongoing CPU in the haptics service --
+ * visible as elevated gamecontrollerd usage -- for as long as it stays
+ * started, which with autoShutdownEnabled = NO and an infinite-duration
+ * continuous player is otherwise "for the rest of the session", even at
+ * zero intensity, even after a single one-off rumble (a hit-reaction
+ * camera shake five minutes into a level, say). The timeout is long
+ * enough that a firefight's rapid hits do not each pay start_motor's
+ * engine-creation cost, and short enough that a rumble nobody has felt
+ * for a while stops being a tax on everything after it.
+ */
+constexpr Clock::duration kMotorIdleTimeout = std::chrono::seconds(3);
+
+void stop_idle_motor(Motor &m, Clock::time_point now) {
+  if (m.player == nil || !m.idle) {
+    return;
+  }
+  if (now - m.idle_since >= kMotorIdleTimeout) {
+    stop_motor(m);
+  }
 }
 
 bool start_motor(Motor &m, GCController *controller, NSString *locality) {
@@ -186,6 +219,14 @@ void set_motor(Motor &m, GCController *controller, NSString *locality,
     return;
   }
   m.intensity = intensity;
+  if (intensity < 0.01f) {
+    if (!m.idle) {
+      m.idle = true;
+      m.idle_since = Clock::now();
+    }
+  } else {
+    m.idle = false;
+  }
   CHHapticDynamicParameter *dyn = [[CHHapticDynamicParameter alloc]
       initWithParameterID:CHHapticDynamicParameterIDHapticIntensityControl
                     value:intensity
@@ -290,6 +331,10 @@ public:
         set_motor(e.low, e.controller, GCHapticsLocalityLeftHandle, 0.0f);
         set_motor(e.high, e.controller, GCHapticsLocalityRightHandle, 0.0f);
       }
+      stop_idle_motor(e.low, now);
+      stop_idle_motor(e.high, now);
+      stop_idle_motor(e.trigger_left, now);
+      stop_idle_motor(e.trigger_right, now);
       read(e);
       if (rescan) {
         // Battery state is a system query, not a register read; once a
