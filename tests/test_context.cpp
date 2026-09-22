@@ -345,6 +345,63 @@ void test_rumble_reaches_the_backend() {
   CHECK_NEAR(virtualpad::rumble_state(vid).low, 0.0f);
 }
 
+void test_repeated_rumble_is_not_resent() {
+  // The shape a camera-shake system actually drives: rumble() called
+  // every frame, whether or not the value it is asking for has moved.
+  // What reaches the backend should track the value, not the call count --
+  // a real device backend would otherwise pay a fresh packet, HID report
+  // or ioctl every frame for nothing, and this is the one place that fix
+  // covers every backend at once instead of each having to remember it.
+  virtualpad::remove_all();
+  Context ctx;
+  ctx.add_mapping(kTestMapping);
+  const auto vid = virtualpad::add(test_spec());
+  ctx.update();
+  const DeviceId id = virtualpad::device_id(vid);
+
+  CHECK(ctx.rumble(id, 0.5f, 0.5f, 0));
+  CHECK(virtualpad::rumble_state(vid).call_count == 1);
+
+  // Same request, several times over: none of these should reach the
+  // backend a second time.
+  CHECK(ctx.rumble(id, 0.5f, 0.5f, 0));
+  CHECK(ctx.rumble(id, 0.5f, 0.5f, 0));
+  CHECK(ctx.rumble(id, 0.5f, 0.5f, 0));
+  CHECK(virtualpad::rumble_state(vid).call_count == 1);
+
+  // A value that actually changes reaches the backend, and starts a new
+  // "unchanged" baseline of its own.
+  CHECK(ctx.rumble(id, 0.5f, 0.6f, 0));
+  CHECK(virtualpad::rumble_state(vid).call_count == 2);
+  CHECK(ctx.rumble(id, 0.5f, 0.6f, 0));
+  CHECK(virtualpad::rumble_state(vid).call_count == 2);
+
+  // Same intensities, but a different duration is not a no-op: it changes
+  // when the rumble will next stop on its own, which is real state a
+  // backend has to be told about even though low/high did not move.
+  CHECK(ctx.rumble(id, 0.5f, 0.6f, 250));
+  CHECK(virtualpad::rumble_state(vid).call_count == 3);
+
+  // stop_rumble() goes through the same path: repeating it while already
+  // stopped costs nothing past the first call.
+  ctx.stop_rumble(id);
+  CHECK(virtualpad::rumble_state(vid).call_count == 4);
+  ctx.stop_rumble(id);
+  ctx.stop_rumble(id);
+  CHECK(virtualpad::rumble_state(vid).call_count == 4);
+
+  // A device that reconnects starts from "nothing sent yet" rather than
+  // inheriting whatever the slot last held, even though low/high/duration
+  // here are identical to what was last (de-duplicated) at that slot.
+  virtualpad::remove(vid);
+  ctx.update();
+  const auto vid2 = virtualpad::add(test_spec());
+  ctx.update();
+  const DeviceId id2 = virtualpad::device_id(vid2);
+  CHECK(ctx.rumble(id2, 0.0f, 0.0f, 0));
+  CHECK(virtualpad::rumble_state(vid2).call_count == 1);
+}
+
 void test_axis_events_are_not_spam() {
   virtualpad::remove_all();
   Config cfg;
@@ -426,6 +483,7 @@ int main() {
   test_report_unmapped_off_hides_it();
   test_backend_mapped_device_skips_the_database();
   test_rumble_reaches_the_backend();
+  test_repeated_rumble_is_not_resent();
   test_axis_events_are_not_spam();
   test_power_is_reported();
   test_multiple_devices_are_independent();

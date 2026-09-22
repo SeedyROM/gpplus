@@ -110,6 +110,22 @@ struct Device {
   std::array<float, kAxisCount> prev_processed{};
 
   const Mapping *mapping = nullptr;
+
+  // The last rumble()/rumble_triggers() actually sent to the backend, so a
+  // request identical to it is not sent again -- see the dedup in
+  // Context::rumble()/rumble_triggers() for why. Reset to "nothing sent
+  // yet" by add_device()'s `d = Device{}`, so a device that reconnects (or
+  // a slot a different device now occupies) always gets its first rumble
+  // through regardless of what the previous occupant last had set.
+  bool has_rumble = false;
+  float rumble_low = 0.0f;
+  float rumble_high = 0.0f;
+  std::uint32_t rumble_duration_ms = 0;
+
+  bool has_trigger_rumble = false;
+  float trigger_rumble_left = 0.0f;
+  float trigger_rumble_right = 0.0f;
+  std::uint32_t trigger_rumble_duration_ms = 0;
 };
 
 } // namespace
@@ -720,14 +736,45 @@ std::uint8_t Context::raw_hat(DeviceId id, int index) const noexcept {
   return d->raw_hats[static_cast<std::size_t>(index)];
 }
 
+// Whether a newly requested (low, high, duration_ms) triple asks for
+// anything different from what was last actually sent. duration_ms is
+// compared exactly, not fuzzily: it is when the rumble will next change on
+// its own (a timed rumble re-armed with the same intensities but a fresh
+// duration is not a no-op, even though the intensities alone did not
+// move), so a real difference there always has to reach the backend.
+bool rumble_state_matches(float last_low, float last_high,
+                          std::uint32_t last_duration_ms, float low,
+                          float high, std::uint32_t duration_ms) noexcept {
+  return last_duration_ms == duration_ms && std::abs(last_low - low) < 0.01f &&
+         std::abs(last_high - high) < 0.01f;
+}
+
 bool Context::rumble(DeviceId id, float low, float high,
                      std::uint32_t duration_ms) {
   Device *d = impl_->find(id);
   if (d == nullptr || d->backend == nullptr || !d->info.caps.rumble) {
     return false;
   }
-  return d->backend->rumble(d->handle, clamp01(low), clamp01(high),
-                            duration_ms);
+  const float lo = clamp01(low);
+  const float hi = clamp01(high);
+  // Skips the backend call entirely when nothing would change -- the
+  // point being a caller that drives rumble continuously (a camera-shake
+  // system calling this every frame, say) does not cost a fresh
+  // packet/report/ioctl on every one of those frames, on every platform,
+  // rather than each backend having to remember to do this itself.
+  if (d->has_rumble &&
+      rumble_state_matches(d->rumble_low, d->rumble_high,
+                           d->rumble_duration_ms, lo, hi, duration_ms)) {
+    return true;
+  }
+  if (!d->backend->rumble(d->handle, lo, hi, duration_ms)) {
+    return false;
+  }
+  d->has_rumble = true;
+  d->rumble_low = lo;
+  d->rumble_high = hi;
+  d->rumble_duration_ms = duration_ms;
+  return true;
 }
 
 bool Context::rumble_triggers(DeviceId id, float left, float right,
@@ -736,15 +783,29 @@ bool Context::rumble_triggers(DeviceId id, float left, float right,
   if (d == nullptr || d->backend == nullptr || !d->info.caps.trigger_rumble) {
     return false;
   }
-  return d->backend->rumble_triggers(d->handle, clamp01(left), clamp01(right),
-                                     duration_ms);
+  const float l = clamp01(left);
+  const float r = clamp01(right);
+  if (d->has_trigger_rumble &&
+      rumble_state_matches(d->trigger_rumble_left, d->trigger_rumble_right,
+                           d->trigger_rumble_duration_ms, l, r,
+                           duration_ms)) {
+    return true;
+  }
+  if (!d->backend->rumble_triggers(d->handle, l, r, duration_ms)) {
+    return false;
+  }
+  d->has_trigger_rumble = true;
+  d->trigger_rumble_left = l;
+  d->trigger_rumble_right = r;
+  d->trigger_rumble_duration_ms = duration_ms;
+  return true;
 }
 
 void Context::stop_rumble(DeviceId id) {
-  Device *d = impl_->find(id);
-  if (d != nullptr && d->backend != nullptr && d->info.caps.rumble) {
-    d->backend->rumble(d->handle, 0.0f, 0.0f, 0);
-  }
+  // Through rumble() itself rather than the backend directly, so this
+  // gets the same dedup: a caller that calls stop_rumble() every frame
+  // while nothing has been rumbling costs nothing past the first call.
+  rumble(id, 0.0f, 0.0f, 0);
 }
 
 bool Context::set_led(DeviceId id, std::uint8_t r, std::uint8_t g,
