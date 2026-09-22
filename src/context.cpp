@@ -743,8 +743,8 @@ std::uint8_t Context::raw_hat(DeviceId id, int index) const noexcept {
 // duration is not a no-op, even though the intensities alone did not
 // move), so a real difference there always has to reach the backend.
 bool rumble_state_matches(float last_low, float last_high,
-                          std::uint32_t last_duration_ms, float low,
-                          float high, std::uint32_t duration_ms) noexcept {
+                          std::uint32_t last_duration_ms, float low, float high,
+                          std::uint32_t duration_ms) noexcept {
   return last_duration_ms == duration_ms && std::abs(last_low - low) < 0.01f &&
          std::abs(last_high - high) < 0.01f;
 }
@@ -763,8 +763,8 @@ bool Context::rumble(DeviceId id, float low, float high,
   // packet/report/ioctl on every one of those frames, on every platform,
   // rather than each backend having to remember to do this itself.
   if (d->has_rumble &&
-      rumble_state_matches(d->rumble_low, d->rumble_high,
-                           d->rumble_duration_ms, lo, hi, duration_ms)) {
+      rumble_state_matches(d->rumble_low, d->rumble_high, d->rumble_duration_ms,
+                           lo, hi, duration_ms)) {
     return true;
   }
   if (!d->backend->rumble(d->handle, lo, hi, duration_ms)) {
@@ -787,8 +787,7 @@ bool Context::rumble_triggers(DeviceId id, float left, float right,
   const float r = clamp01(right);
   if (d->has_trigger_rumble &&
       rumble_state_matches(d->trigger_rumble_left, d->trigger_rumble_right,
-                           d->trigger_rumble_duration_ms, l, r,
-                           duration_ms)) {
+                           d->trigger_rumble_duration_ms, l, r, duration_ms)) {
     return true;
   }
   if (!d->backend->rumble_triggers(d->handle, l, r, duration_ms)) {
